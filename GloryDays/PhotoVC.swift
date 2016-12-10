@@ -13,12 +13,19 @@ import Speech
 
 private let reuseIdentifier = "photoCell"
 
-class PhotoVC: UICollectionViewController, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+class PhotoVC: UICollectionViewController, UIImagePickerControllerDelegate, UINavigationControllerDelegate, AVAudioRecorderDelegate {
     
     var memories: [URL] =  []
+    var currentMemory: URL!
+    var audioRecorder: AVAudioRecorder?
+    var audioPlayer : AVAudioPlayer?
+    var recordingURL : URL!
+
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        
+        self.recordingURL =  getDocumentsDirectory().appendingPathComponent("memory-recording.m4a")
         self.loadMemories()
         
         navigationItem.rightBarButtonItem = UIBarButtonItem.init(barButtonSystemItem: .camera, target: self, action: #selector(self.addImagePressed))
@@ -178,7 +185,128 @@ class PhotoVC: UICollectionViewController, UIImagePickerControllerDelegate, UINa
         let memoryName = self.thumbnailURL(for: memory).path
         let image = UIImage(contentsOfFile: memoryName)
         cell.imageView.image = image
+        
+        if cell.gestureRecognizers == nil {
+            
+            let recognizer = UILongPressGestureRecognizer(target: self, action: #selector(self.cellLongPressed))
+            recognizer.minimumPressDuration = 0.3
+            cell.addGestureRecognizer(recognizer)
+            
+            cell.layer.borderColor = UIColor.white.cgColor
+            cell.layer.borderWidth = 4.0
+            cell.layer.cornerRadius = 10
+        }
+        
         return cell
+    }
+    
+    func cellLongPressed(sender: UILongPressGestureRecognizer)  {
+        
+        if sender.state == .began {
+            
+            let cell = sender.view as! PhotoCell
+            if let index = collectionView?.indexPath(for: cell) {
+                self.currentMemory = self.memories[index.row]
+                self.startRecordingMemory()
+            }
+            
+        } else if sender.state == .ended {
+            self.finishRecordingmemory(success: true)
+        }
+    }
+    
+    func startRecordingMemory() {
+        
+        self.audioPlayer?.stop()
+        
+        collectionView?.backgroundColor = #colorLiteral(red: 0.8878455758, green: 0.4013058543, blue: 0.2430705428, alpha: 1)
+        
+        let recordingSession = AVAudioSession.sharedInstance()
+        
+        do {
+            
+            try recordingSession.setCategory(AVAudioSessionCategoryPlayAndRecord, with:.defaultToSpeaker)
+            try recordingSession.setActive(true)
+            
+            let recordinSettings = [AVFormatIDKey : Int(kAudioFormatMPEG4AAC),
+                                    AVSampleRateKey : 44100,
+                                    AVNumberOfChannelsKey : 2,
+                                    AVEncoderAudioQualityKey : AVAudioQuality.high.rawValue]
+            
+            self.audioRecorder = try AVAudioRecorder(url: recordingURL, settings: recordinSettings)
+            self.audioRecorder?.delegate = self
+            self.audioRecorder?.record()
+            
+            
+        } catch let error {
+            print(error.localizedDescription)
+            self.finishRecordingmemory(success: false)
+        }
+    }
+    
+    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        
+        if flag {
+            self.finishRecordingmemory(success: true)
+        }
+    }
+    
+    func finishRecordingmemory(success: Bool) {
+        
+        collectionView?.backgroundColor = #colorLiteral(red: 0.5091350079, green: 0.9878887534, blue: 0.8044660687, alpha: 1)
+        self.audioRecorder?.stop()
+        
+        if success {
+            do {
+            
+                let memoryAdioURL = self.currentMemory.appendingPathExtension("m4a")
+                let fileManager = FileManager.default
+            
+                if fileManager.fileExists(atPath: memoryAdioURL.path) {
+                    try fileManager.removeItem(at: memoryAdioURL)
+                }
+                try fileManager.moveItem(at: recordingURL, to: memoryAdioURL)
+                
+                self.transcribeAudioToText(memory: self.currentMemory)
+                
+            } catch let error{
+                print(error.localizedDescription)
+            }
+        }
+    }
+    
+    func transcribeAudioToText(memory : URL) {
+        
+        let audio = audioURL(for: memory)
+        let transcription = transcriptionURL(for: memory)
+        
+        
+        let recognizer = SFSpeechRecognizer()
+        let request = SFSpeechURLRecognitionRequest(url: audio)
+        
+        recognizer?.recognitionTask(with: request, resultHandler: { [unowned self] (result, error) in
+            
+            guard let result = result else {
+                print("Ha habido el siguiente error : \(error)")
+                return
+            }
+            
+            if result.isFinal {
+                
+                let text = result.bestTranscription.formattedString
+                
+                do {
+                    try text.write(to: transcription, atomically: true, encoding: String.Encoding.utf8)
+                    self.indexMemory(memory: memory, text: text)
+                } catch {
+                    print("Ha habido un error al guardar la traducción")
+                }
+            }
+        })
+    }
+    
+    func indexMemory(memory: URL, text: String) {
+        
     }
     
     override func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath) -> UICollectionReusableView {
@@ -187,11 +315,36 @@ class PhotoVC: UICollectionViewController, UIImagePickerControllerDelegate, UINa
         return header
     }
     
-    func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, referenceSizeForHeaderInSection section: Int) -> CGSize {
+     func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, referenceSizeForHeaderInSection section: Int) -> CGSize {
         if section == 0 {
             return CGSize(width: 0, height: 50)
         } else {
             return CGSize.zero
+        }
+    }
+    
+    override func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        
+        let memory = self.memories[indexPath.row]
+        let fileManager = FileManager.default
+        
+        do {
+            
+            let audioName = audioURL(for: memory)
+            let transcriptionName = transcriptionURL(for: memory)
+            
+            if fileManager.fileExists(atPath: audioName.path) {
+                self.audioPlayer = try AVAudioPlayer(contentsOf: audioName)
+                self.audioPlayer?.play()
+            }
+            
+            if fileManager.fileExists(atPath: transcriptionName.path){
+                let contents = try String(contentsOf: transcriptionName)
+                print(contents)
+            }
+            
+        } catch {
+            print("error to load the audio")
         }
     }
 
